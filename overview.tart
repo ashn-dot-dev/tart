@@ -1,0 +1,230 @@
+# Call the print builtin with the string argument "hello, world".
+[print "hello, world"]
+
+
+# Call the print builtin with two bare string arguments, "hello," and "world".
+# A bare string is any sequence of non-whitespace characters except for the
+# characters [ and ] which are used to denote procedure invocation.
+#
+# The print builtin takes any number of arguments and prints each argument
+# separated by a space. The following print call will produce exactly the same
+# output as the previous print call shown just above.
+[print hello, world]
+
+
+# Whitespace is not significant in Tart, so this invocation of print is exactly
+# equivalent to the previous print call shown just above.
+[print     hello,    world]
+
+
+# Variables are declared with the let builtin.
+[let name Alice]
+
+
+# Retrieve the value of an existing variable with the get builtin.
+[print [get name]]
+
+
+# Change the value of an existing variable with the set builtin.
+[set name Bob]
+[print [get name]]
+
+
+# Any string can be used as a variable name.
+[let favorite-appetizer "baked brie"]
+[let "favorite desert" "strawberry tart"]
+
+
+# Procedures are created with the lambda builtin.
+[print [lambda [name] [string hello [get name]]]]
+
+
+# Immediately calling a lambda.
+[print [[lambda [name] [string hello [get name]]] Alice]]
+
+
+# Assign a lambda to a variable and then later call that lambda by value.
+[let greet [lambda [name]
+    [string hello [get name]]]]
+[print [[get greet] Bob]]
+
+
+# The lambda invocation
+#
+#   [STRING ARGUMENT-1 ARGUMENT-2 ETC...]
+#
+# is shorthand for
+#
+#   [[get STRING] ARGUMENT-1 ARGUMENT-2 ETC...]
+#
+# and is the way that lambdas bound to variables are usually called.
+[print [greet "Bob (again)"]]
+
+
+# Lambdas may contain more than one expression. The last expression executed
+# within the lambda body becomes the return value of a lambda invocation.
+[let push-suspicious-button [lambda []
+    [print Initiating self destruct sequence... 5... 4... 3... 2... 1...]
+    BOOM]]
+[let consequences [push-suspicious-button]]
+[print "What did pushing that button do exactly?" [get consequences]]
+
+
+# If the last parameter of a lambda ends with "..." then the lambda is
+# variadic, and all extra parameters are collected into a variadic argument
+# vector.
+[let declare-winners [lambda [first second third rest...]
+    [join
+        ", "
+        [cat
+            [vector
+                [string GOLD: [get first]]
+                [string SILVER: [get second]]
+                [string BRONZE: [get third]]]
+            [get rest]]]]]
+[print [declare-winners Alice Bob Carol Dan Eve]]
+
+
+# Lambdas close over their environment.
+[let greeter [lambda [name]
+    [lambda [] [string howdy [get name]]]]]
+[let alice-greeter [greeter Alice]]
+[print [alice-greeter]]
+
+
+# The string builtin is used to create a single string value from multiple
+# arguments. The arguments passed to string will be separated by a space
+# character if they were not already separated by whitespace.
+[let str [string foo bar baz]]
+[set str [string foo "\tbar" baz]]
+
+
+# The vector builtin is used to create a vector from multiple arguments.
+# Vectors are ordered collections of elements similar to array and/or list
+# types found in other languages.
+[let vec [vector foo bar baz]]
+[set vec [vector
+    bare-string
+    "another string"
+    "string\twith\nescapes\\"
+    "" # empty string
+    [lambda [] [print beep]]
+    [vector nested vector]]]
+
+
+# The cat builtin is used to concatenate strings without a separator.
+[print [cat foo bar baz]]
+
+
+# The cat builtin may also be used to concatenate vectors.
+[print [cat [vector a b c] [vector 1 2 3] [vector do re mi]]]
+
+
+# The join builtin is used to concatenate the stringified elements of a vector
+# together with a provided separator between concatenated elements.
+[print [join "|" [vector a b c]]]
+
+
+# In this example the element [vector foo bar] is stringified into "foo bar"
+# before being joined with the string "baz" producing the joined "foo bar|baz".
+[print [join "|"
+    [vector
+        [vector foo bar]
+        baz]]]
+
+
+# The map builtin can be used to apply a lambda over the elements of a vector.
+[let html-list-item [lambda [content...]
+    [join "" [vector <li> [get content] </li>]]]]
+[let html-ordered-list [lambda [content...]
+    [let list-items [map [get html-list-item] [get content]]]
+    [join "" [cat [vector <ol>] [get list-items] [vector </ol>]]]]]
+[print [html-ordered-list Apples Bananas "Baby Carrots"]]
+
+
+# Tart documents are able to define custom markup semantics though the
+# combination of language builtins and user-defined procedures in ways not
+# available in most other markup languages. Here we abstract the concept of an
+# HTML section heading into a procedure and then use that procedure to create
+# other procedures that build HTML elements for each section heading level.
+[let html-section-heading [lambda [level content...]
+    [join ""
+        [vector
+            [cat <h [get level] >]
+            [get content]
+            [cat </h [get level] >]]]]]
+
+[let html-section-heading-1 [lambda [content...]
+    [html-section-heading 1 [get content]]]]
+
+[let html-section-heading-2 [lambda [content...]
+    [html-section-heading 2 [get content]]]]
+
+[let html-section-heading-3 [lambda [content...]
+    [html-section-heading 3 [get content]]]]
+
+[let html-section-heading-4 [lambda [content...]
+    [html-section-heading 4 [get content]]]]
+
+[let html-section-heading-5 [lambda [content...]
+    [html-section-heading 5 [get content]]]]
+
+[let html-section-heading-6 [lambda [content...]
+    [html-section-heading 6 [get content]]]]
+
+
+# Invoking the print builtin will immediately write out its stringified
+# arguments when executed. However, Tart is fundamentally a markup language,
+# and Tart documents are generally constructed by chaining a series of
+# expressions together which are stringified, joined, and written out by the
+# interpreter *after* the full document has been evaluated. Here we use a
+# combination of plain text and our previously defined procedures to construct
+# an HTML document describing a PB&J recipe.
+[html-section-heading-1 Peanut Butter and Jelly]
+
+The classic peanut butter and jelly sandwich.
+It is peanut butter jelly time.
+
+[html-section-heading-2 Ingredients:]
+[html-ordered-list
+    [string bread (2 slices)]
+    [string peanut butter]
+    [string jelly]]
+
+[html-section-heading-2 Instructions:]
+[html-ordered-list
+    [string Spread peanut butter on a slice of bread.]
+    [string Spread jelly on the other slice of bread.]
+    [string
+        Put the two slices of bread together to create a sandwich filled with a
+        mixture of peanut butter and jelly.]]
+
+
+# Newline separating the previous and next sections so that it is easier to see
+# what is going on when running this document from the command line.
+"\n"
+
+
+# Code reuse is facilitated through the run builtin. The expression
+#
+#   [run RELATIVE-PATH]
+#
+# will execute RELATIVE-PATH as a Tart document using the current environment.
+# Here we will write the same PB&J recipe as above, only this time we will do
+# so using the constructs declared in the lib/recipe.tart library.
+[run lib/recipe.tart]
+[recipe Peanut Butter and Jelly]
+
+The classic peanut butter and jelly sandwich.
+It is peanut butter jelly time.
+
+[ingredients
+    [- bread (2 slices)]
+    [- peanut butter]
+    [- jelly]]
+
+[instructions
+    [- Spread peanut butter on a slice of bread.]
+    [- Spread jelly on the other slice of bread.]
+    [- Put the two slices of bread together to create a sandwich filled with a
+       mixture of peanut butter and jelly.]]

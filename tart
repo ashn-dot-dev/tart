@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+
+import argparse
+import enum
+import os
+import re
+import sys
+from typing import Callable, Dict, List, Optional, Union, cast
+
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+
+
+class SourceLocation:
+    def __init__(self, path: str, line: int) -> None:
+        self.path = path
+        self.line = line
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.path}, {repr(self.line)})"
+
+    def __str__(self) -> str:
+        return f"{self.path}, line {self.line}"
+
+    def clone(self) -> "SourceLocation":
+        return SourceLocation(self.path, self.line)
+
+
+class TokenKind(enum.Enum):
+    EOF = "end-of-file"
+    LBRACKET = "["
+    RBRACKET = "]"
+    STRING = "string"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class Token:
+    def __init__(
+        self,
+        location: SourceLocation,
+        kind: TokenKind,
+        literal: Optional[str] = None,
+        value: Optional[str] = None,
+    ) -> None:
+        self.location: SourceLocation = location
+        self.kind = kind
+        self.literal = literal if literal is not None else kind.value
+        self.value = value
+
+    def __str__(self) -> str:
+        if self.kind == TokenKind.STRING:
+            return f"{self.kind}({self.literal})"
+        return f"{self.kind.value}"
+
+
+class ParseError(Exception):
+    def __init__(self, location: SourceLocation, message: str) -> None:
+        self.location = location
+        self.message = message
+
+    def __str__(self) -> str:
+        return f"[{self.location}] {self.message}"
+
+
+class EvaluationError(Exception):
+    def __init__(self, location: SourceLocation, message: str) -> None:
+        self.location = location
+        self.message = message
+
+    def __str__(self) -> str:
+        return f"[{self.location}] {self.message}"
+
+
+class Lexer:
+    EOF_LITERAL = ""
+
+    def __init__(self, source: str, location: SourceLocation) -> None:
+        self.source = source
+        self.location = location.clone()
+        self.position = 0
+
+    def next_token(self) -> Token:
+        # Skip whitespace and comments.
+        while self._cur_char().isspace() or self._cur_char() == "#":
+            if self._cur_char().isspace():
+                self.location.line += self._cur_char() == "\n"
+                self.position += 1
+                continue
+            if self._cur_char() == "#":
+                while not self._is_eof() and self._cur_char() != "\n":
+                    self.position += 1
+                self.position += 1
+                self.location.line += 1
+                continue
+
+        start = self.position
+        location = self.location.clone()
+
+        if self._is_eof():
+            return Token(location, TokenKind.EOF)
+
+        if self._cur_char() == TokenKind.LBRACKET.value:
+            self.position += len(TokenKind.LBRACKET.value)
+            return Token(location, TokenKind.LBRACKET)
+
+        if self._cur_char() == TokenKind.RBRACKET.value:
+            self.position += len(TokenKind.LBRACKET.value)
+            return Token(location, TokenKind.RBRACKET)
+
+        if self._cur_char() == '"':
+            self.position += len('"')
+            value = ""
+            while self._cur_char() != '"':
+                char = self._advance_char()
+                value += char
+            self.position += len('"')
+            assert not self._is_eof()
+            literal = self.source[start : self.position]
+            return Token(location, TokenKind.STRING, literal, value)
+
+        while (
+            not self._is_eof()
+            and not self._cur_char().isspace()
+            and not self._cur_char() == TokenKind.LBRACKET.value
+            and not self._cur_char() == TokenKind.RBRACKET.value
+            and not self._cur_char() == '"'
+        ):
+            self.position += 1
+        literal = self.source[start : self.position]
+        return Token(location, TokenKind.STRING, literal, literal)
+
+    def _is_eof(self) -> bool:
+        return self.position >= len(self.source)
+
+    def _cur_char(self) -> str:
+        if self._is_eof():
+            return Lexer.EOF_LITERAL
+        return self.source[self.position]
+
+    def _advance_char(self) -> str:
+        if self._is_eof():
+            raise ParseError(self.location, "invalid character")
+        if self._cur_char() == "\n":
+            raise ParseError(
+                self.location, "invalid newline in string literal"
+            )
+        # Non-Escape Sequence
+        if self._cur_char() != "\\":
+            char = self._cur_char()
+            self.position += 1
+            return char
+        # Escape Sequence
+        self.position += len("\\")
+        if self._cur_char() == "\\":
+            self.position += 1
+            return "\\"
+        if self._cur_char() == "t":
+            self.position += 1
+            return "\t"
+        if self._cur_char() == "n":
+            self.position += 1
+            return "\n"
+        raise ParseError(self.location, "invalid escape character")
+
+
+class AstExpression:
+    def __init__(self) -> None:
+        self.location: SourceLocation
+        raise NotImplementedError()
+
+    def evaluate(self, environment: "Environment") -> "Value":
+        raise NotImplementedError()
+
+
+class AstString(AstExpression):
+    def __init__(self, location: SourceLocation, value: str) -> None:
+        self.location = location
+        self.value = value
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}({repr(self.location)}, {repr(self.value)})"
+        )
+
+    def __str__(self) -> str:
+        if not len(self.value):
+            return '""'
+        if re.search(r"\s", self.value):
+            escaped = self.value.replace("\\", "\\\\")
+            escaped = escaped.replace("\t", "\\t")
+            escaped = escaped.replace("\n", "\\n")
+            return f'"{escaped}"'
+        return self.value
+
+    def evaluate(self, environment: "Environment") -> "Value":
+        return self.value
+
+
+class AstVector(AstExpression):
+    def __init__(
+        self, location: SourceLocation, elements: List[AstExpression]
+    ) -> None:
+        self.location = location
+        self.elements = elements
+
+    def __repr__(self) -> str:
+        elements = ", ".join([repr(x) for x in self.elements])
+        return f"{type(self).__name__}({repr(self.location)}, [{elements}])"
+
+    def __str__(self) -> str:
+        elements = " ".join([str(x) for x in self.elements])
+        return f"[{elements}]"
+
+    def evaluate(self, environment: "Environment") -> "Value":
+        if len(self.elements) == 0:
+            raise EvaluationError(
+                self.location, "attempted procedure call on an empty vector"
+            )
+
+        try:
+            function = self.elements[0].evaluate(environment)
+            if isinstance(function, str):
+                function = environment.get(function)
+
+            if callable(function):
+                return function(self.elements[1:], environment)
+
+            if isinstance(function, Lambda):
+                args = evaluate_arguments(self.elements[1:], environment)
+                return function.call(args, environment)
+        except RuntimeError as e:
+            raise EvaluationError(self.location, str(e)) from e
+        raise EvaluationError(self.location, "expression is not callable")
+
+
+class AstProgram:
+    def __init__(self, elements: List[AstExpression]) -> None:
+        self.elements = elements
+
+    def __repr__(self) -> str:
+        elements = ", ".join([repr(x) for x in self.elements])
+        return f"{type(self).__name__}([{elements}])"
+
+    def __str__(self) -> str:
+        return "\n".join([str(x) for x in self.elements])
+
+
+class Parser:
+    def __init__(self, lexer: Lexer) -> None:
+        self.lexer: Lexer = lexer
+        self.current = lexer.next_token()
+
+    def parse(self) -> AstProgram:
+        expressions: List[AstExpression] = []
+        while self.current.kind != TokenKind.EOF:
+            expressions.append(self.parse_expression())
+        return AstProgram(expressions)
+
+    def parse_expression(self) -> AstExpression:
+        if self.current.kind == TokenKind.STRING:
+            assert self.current.value is not None
+            expr = AstString(self.current.location, self.current.value)
+            self.current = self.lexer.next_token()
+            return expr
+
+        if self.current.kind == TokenKind.LBRACKET:
+            location = self.current.location
+            elements: List[AstExpression] = []
+            self.current = self.lexer.next_token()
+            while self.current.kind != TokenKind.RBRACKET:
+                elements.append(self.parse_expression())
+            if self.current.kind != TokenKind.RBRACKET:
+                raise ParseError(
+                    self.current.location,
+                    f"expected {TokenKind.RBRACKET} (found {self.current})",
+                )
+            self.current = self.lexer.next_token()
+            return AstVector(location, elements)
+
+        raise ParseError(
+            self.current.location,
+            f"expected expression (found {self.current})",
+        )
+
+
+class Lambda:
+    def __init__(
+        self,
+        parameters: List[AstString],
+        statements: List[AstExpression],
+        environment: "Environment",
+    ) -> None:
+        self.parameters = parameters
+        self.statements = statements
+        self.environment = environment
+        self.is_variadic = len(parameters) != 0 and parameters[
+            -1
+        ].value.endswith("...")
+
+    def __repr__(self) -> str:
+        statements = ", ".join([repr(x) for x in self.statements])
+        return f"{type(self).__name__}({self.parameters}, [{statements}])"
+
+    def __str__(self) -> str:
+        parameters = " ".join([str(x) for x in self.parameters])
+        statements = " ".join([str(x) for x in self.statements])
+        return f"[lambda [{parameters}] [{statements}]]"
+
+    def call(
+        self, arguments: List["Value"], environment: "Environment"
+    ) -> "Value":
+        if self.is_variadic:
+            expect_minimum_n_arguments(arguments, len(self.parameters) - 1)
+        else:
+            expect_exactly_n_arguments(arguments, len(self.parameters))
+
+        locals = Environment(self.environment)
+        for i in range(len(self.parameters)):
+            identifier = self.parameters[i].value
+            if identifier.endswith("..."):
+                assert i == len(self.parameters) - 1
+                identifier = identifier[: -len("...")]
+                locals.let(identifier, arguments[i:])
+                break
+            locals.let(identifier, arguments[i])
+
+        result: Value = ""
+        for s in self.statements:
+            result = s.evaluate(locals)
+        return result
+
+
+Value = Union[str, list, Lambda, Callable]
+
+
+class Environment:
+    def __init__(self, outer: Optional["Environment"] = None) -> None:
+        self.outer: Optional["Environment"] = outer
+        self.store: Dict[str, Value] = dict()
+
+    def let(self, name: str, value: Value) -> None:
+        if name in self.store:
+            raise RuntimeError(f"redeclaration of variable `{name}`")
+        self.store[name] = value
+
+    def set(self, name: str, value: Value) -> None:
+        if name not in self.store:
+            raise RuntimeError(f"use of undeclared variable `{name}`")
+        self.store[name] = value
+
+    def get(self, name: str) -> Value:
+        value = self.store.get(name, None)
+        if value is not None:
+            return value
+        if self.outer is not None:
+            return self.outer.get(name)
+        raise RuntimeError(f"use of undeclared variable `{name}`")
+
+
+def value_typeof(value: Value) -> str:
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "vector"
+    if isinstance(value, Lambda):
+        return "lambda"
+    if callable(value):
+        return "builtin"
+    raise RuntimeError(f"unhandled type {type(value)}")
+
+
+def value_to_string(value: Value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        strings = [value_to_string(element) for element in value]
+        strings = [s for s in strings if s]  # Remove empty strings.
+        return " ".join(strings)
+    if isinstance(value, Lambda):
+        return str(value)
+    if callable(value):
+        raise RuntimeError("attempted to stringify builtin")
+    raise RuntimeError(f"unhandled type {type(value)}")
+
+
+def evaluate_arguments(
+    arguments: List[AstExpression], environment: Environment
+) -> List[Value]:
+    return [x.evaluate(environment) for x in arguments]
+
+
+def expect_exactly_n_arguments(arguments: List[Value], n: int) -> None:
+    if n != len(arguments):
+        raise RuntimeError(
+            f"expected exactly {n} arguments (received {len(arguments)})"
+        )
+
+
+def expect_minimum_n_arguments(arguments: List[Value], n: int) -> None:
+    if n > len(arguments):
+        raise RuntimeError(
+            f"expected minimum {n} arguments (received {len(arguments)})"
+        )
+
+
+def expect_string_argument(arguments: List[Value], index: int) -> str:
+    if not isinstance(arguments[index], str):
+        raise RuntimeError(
+            f"expected string for argument {index+1} (received {value_typeof(arguments[index])})"
+        )
+    return cast(str, arguments[index])
+
+
+def expect_vector_argument(arguments: List[Value], index: int) -> list:
+    if not isinstance(arguments[index], list):
+        raise RuntimeError(
+            f"expected vector for argument {index+1} (received {value_typeof(arguments[index])})"
+        )
+    return cast(list, arguments[index])
+
+
+def expect_lambda_argument(arguments: List[Value], index: int) -> Lambda:
+    if not isinstance(arguments[index], Lambda):
+        raise RuntimeError(
+            f"expected lambda for argument {index+1} (received {value_typeof(arguments[index])})"
+        )
+    return cast(Lambda, arguments[index])
+
+
+# [let identifier value]
+def builtin_let(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 2)
+    identifier = expect_string_argument(args, 0)
+    value = args[1]
+    environment.let(identifier, value)
+    return ""
+
+
+# [set identifier value]
+def builtin_set(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 2)
+    identifier = expect_string_argument(args, 0)
+    value = args[1]
+    environment.set(identifier, value)
+    return ""
+
+
+# [get identifier value]
+def builtin_get(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 1)
+    identifier = expect_string_argument(args, 0)
+    return environment.get(identifier)
+
+
+# [string arguments...]
+def builtin_string(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    strings = [value_to_string(arg) for arg in args]
+    strings = [s for s in strings if s]  # Remove empty strings.
+    if len(strings) == 0:
+        return ""
+    result = strings[0]
+    for i in range(1, len(strings)):
+        separator = " "  # Default to space-separating argument strings.
+        if len(result) and result[-1].isspace():
+            separator = ""  # <string-ending-in-whitespace> <string>
+        if len(strings[i]) and strings[i][0].isspace():
+            separator = ""  # <string> <string-starting-with-whitespace>
+        result += separator + strings[i]
+    return result
+
+
+# [vector arguments...]
+def builtin_vector(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    return evaluate_arguments(arguments, environment)
+
+
+# [lambda [parameters...] statements...]
+def builtin_lambda(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    if len(arguments) == 0:
+        raise RuntimeError("expected lambda parameter vector")
+
+    if not isinstance(arguments[0], AstVector):
+        raise ParseError(
+            arguments[0].location, "expected lambda parameter vector"
+        )
+
+    parameters = arguments[0].elements
+    for i in range(len(parameters)):
+        if not isinstance(parameters[i], AstString):
+            raise ParseError(
+                parameters[i].location,
+                "expected string literal in lambda parameter vector",
+            )
+        parameter = cast(AstString, parameters[i])
+        if parameter.value.endswith("..."):
+            if i != len(parameters) - 1:
+                raise ParseError(
+                    parameter.location,
+                    f"variadic lambda parameter {parameter.value} must appear last in the lambda parameter vector",
+                )
+
+    statements = arguments[1:]
+    return Lambda(cast(List[AstString], parameters), statements, environment)
+
+
+# [print arguments...]
+def builtin_print(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    strings = [value_to_string(arg) for arg in args]
+    strings = [s for s in strings if s]  # Remove empty strings.
+    print(" ".join(strings))
+    return ""
+
+
+# [cat args...]
+def builtin_cat(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+
+    # If cat was invoked with zero arguments then there is no way to know
+    # whether the type of the resulting expression should be a string or a
+    # vector. Default to returning string since Tart is a string-based language
+    # and the empty string is filtered out other builtin constructs.
+    if len(args) == 0:
+        return ""
+
+    result = args[0]
+    if not isinstance(result, (str, list)):
+        raise RuntimeError(
+            f"cannot concatenate values of type {value_typeof(result)}"
+        )
+    for i in range(1, len(args)):
+        if not isinstance(args[i], type(result)):
+            raise RuntimeError(
+                f"cannot concatenate values of type {value_typeof(args[i-1])} (argument {i-1}) and {value_typeof(args[i])} (argument {i})"
+            )
+        result += args[i]  # type: ignore
+    return result
+
+
+# [join separator vector]
+def builtin_join(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 2)
+    separator = expect_string_argument(args, 0)
+    vector = expect_vector_argument(args, 1)
+    return separator.join([value_to_string(x) for x in vector])
+
+
+# [map lambda vector]
+def builtin_map(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 2)
+    lambda_ = expect_lambda_argument(args, 0)
+    vector = expect_vector_argument(args, 1)
+    return [lambda_.call([x], environment) for x in vector]
+
+
+# [run path]
+def builtin_run(
+    arguments: List[AstExpression], environment: Environment
+) -> Value:
+    args = evaluate_arguments(arguments, environment)
+    expect_exactly_n_arguments(args, 1)
+    path = expect_string_argument(args, 0)
+
+    current_path = environment.get("file")
+    if not isinstance(current_path, str):
+        raise RuntimeError(
+            f"expected string value for the current file variable `file` (received {value_typeof(current_path)})"
+        )
+
+    module_path = os.path.join(os.path.dirname(current_path), path)
+    with open(module_path, "r") as f:
+        execute(
+            f.read(),
+            SourceLocation(os.path.realpath(module_path), 1),
+            environment,
+        )
+
+    environment.set("file", current_path)
+    return ""
+
+
+def execute(
+    source: str, location: SourceLocation, environment: Environment
+) -> None:
+    lexer = Lexer(source, location)
+    parser = Parser(lexer)
+    ast = parser.parse()
+    result = builtin_string(ast.elements, environment)
+    if result:
+        print(result)
+
+
+def main():
+    description = "The Tart Markup Language"
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("path", type=str, metavar="FILE")
+    args = parser.parse_args()
+
+    environment = Environment()
+    environment.let("let", builtin_let)
+    environment.let("set", builtin_set)
+    environment.let("get", builtin_get)
+    environment.let("string", builtin_string)
+    environment.let("vector", builtin_vector)
+    environment.let("lambda", builtin_lambda)
+    environment.let("print", builtin_print)
+    environment.let("cat", builtin_cat)
+    environment.let("join", builtin_join)
+    environment.let("map", builtin_map)
+    environment.let("run", builtin_run)
+    try:
+        with open(args.path, "r") as f:
+            environment.let("file", os.path.realpath(args.path))
+            execute(
+                f.read(),
+                SourceLocation(os.path.realpath(args.path), 1),
+                environment,
+            )
+    except (FileNotFoundError, ParseError, EvaluationError) as e:
+        print(e, file=sys.stderr)
+        sys.exit(EXIT_FAILURE)
+
+
+if __name__ == "__main__":
+    main()

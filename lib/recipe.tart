@@ -1,0 +1,32 @@
+[let hx [lambda [level args...]
+    [join ""
+        [vector
+            [cat <h [get level] >]
+            [get args]
+            [cat </h [get level] >]]]]]
+
+[let h1 [lambda [args...] [hx 1 [get args]]]]
+[let h2 [lambda [args...] [hx 2 [get args]]]]
+
+[let li-vector [lambda [args]
+    [join "" [vector <li> [get args] </li>]]]]
+[let ol-vector [lambda [args]
+    [let list-items [map [get li] [get args]]]
+    [join "" [cat [vector <ol>] [get list-items] [vector </ol>]]]]]
+[let ul-vector  [lambda [args]
+    [let list-items [map [get li] [get args]]]
+    [join "" [cat [vector <ul>] [get list-items] [vector </ul>]]]]]
+
+[let li [lambda [args...] [li-vector [get args]]]]
+[let ol [lambda [args...] [ol-vector [get args]]]]
+[let ul [lambda [args...] [ul-vector [get args]]]]
+
+[let recipe [lambda [args...] [h1 [get args]]]]
+
+[let ingredients [lambda [args...]
+    [string [h2 Ingredients] [ul-vector [get args]]]]]
+
+[let instructions [lambda [args...]
+    [string [h2 Instructions] [ol-vector [get args]]]]]
+
+[let - [lambda [args...] [string [get args]]]]
